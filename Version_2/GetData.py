@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 from matplotlib.dates import AutoDateLocator
-from keras.layers import GRU, Dense, Dropout
+from keras.layers import GRU, Dense, Dropout, Masking, Input, Flatten, TimeDistributed
 from keras.models import Sequential
 from datetime import datetime
 from pandas import DataFrame
@@ -15,8 +15,9 @@ from pandas import DataFrame
 pro = ts.pro_api(
     "ae9f4f65551123476a01659ecfd124dd832881d99b57574f64f8d333")
 
-
 # 获取沪股通、深股通成分
+
+
 def get_hs(start: str, end: str, codeList: list = None, ktype="D"):
     stocks = {}
 
@@ -48,88 +49,96 @@ def get_hs(start: str, end: str, codeList: list = None, ktype="D"):
     return stocks
 
 
-def fomatData(stock: dict, batch_size: int, length: int):
+def fomatData(stock: dict, indicator: list, length: int, further: int):
     assert(len(stock) == batch_size)
 
-    length = -1
-    for key in stock:
-        # 获取最小长度并初始化
-        if(length == -1):
-            length = stock[key].shape[0]
-        else:
-            length = min(length, stock[key].shape[0])
+    # 变量初始化
+    data = np.zeros(shape=(len(stock), length, 4), dtype=np.float)
+    label = np.zeros(shape=(len(stock), length, 4*further), dtype=np.float)
 
-    length -= 1
-    train_data = np.zeros(shape=(length*batch_size, 1, 3), dtype=np.float)
-    train_label = np.zeros(shape=(length*batch_size, 3), dtype=np.float)
+    # 数据规范处理
 
-    counter = -1
-    for key in stock:
-        # 获取并处理DataFrame
-        df = stock[key]
-        df.fillna(0.01)
-
-        counter += 1
-        # 缩放因子
-        scaleFactor = {}
-        scaleFactor["open"] = df["open"][0]
-        scaleFactor["close"] = df["close"][0]
-        scaleFactor["low"] = df["low"][0]
-
-        # 数据规范处理
-        data = df.loc[:, ['open', 'close', 'low']]
-        for index, row in data.iterrows():
-            last = (index-1) * batch_size + counter
-            current = index * batch_size + counter
-
-            if(index > 0):
-                train_label[last, 0] = row['open'] / scaleFactor["open"]
-                train_label[last, 1] = row['close'] / scaleFactor["close"]
-                train_label[last, 2] = row['low'] / scaleFactor["low"]
-
-            if(index >= length):
-                break
-
-            train_data[current, 0, 0] = row['open'] / scaleFactor["open"]
-            train_data[current, 0, 1] = row['close'] / scaleFactor["close"]
-            train_data[current, 0, 2] = row['low'] / scaleFactor["low"]
-
-    return train_data,  train_label, length
-
-
-def showData(stocks, predicts, data, length, batch_size):
     counter = 0
-    for key in stocks:
+
+    for key, df in stock.items():
+        df.fillna(0)  # 筛除不合法数据
+
+        scaler = {key: df.at[0, key] for _, key in enumerate(indicator)}
+        max_len = df.shape[0]-further
+        previous = {}
+        for index, row in df.iterrows():
+            for subindex, key in enumerate(indicator):
+                for i in range(further):
+                    if(index > i and index-i < max_len):
+                        label[counter, index-i-1,
+                              subindex+i*len(indicator)] = row[key]/scaler[key]
+                        # label[counter, index-1,
+                        #       subindex] = 1 if(previous[key] < row[key]) else 0
+
+                if(index < max_len):
+                    data[counter, index, subindex] = row[key]/scaler[key]
+                    previous[key] = row[key]
+        counter += 1
+    return data, label
+
+
+def showData(predicts: np.ndarray, data: np.ndarray, indicator: list, stocks: dict, further: int):
+    counter = -1
+    colorList = ['r', 'g', 'b', 'k', 'm', 'c', '#66ccff', '#ffcc00']
+    for _, stock in stocks.items():
         # 选择股票
         counter += 1
-        stock = stocks[key]
-        frameList = [i*batch_size+counter-1 for i in range(length)]
-        predicted = predicts[frameList]
-        dataRow = data[frameList]
-
+        scaler = {key: stock.at[0, key] for _, key in enumerate(indicator)}
+        data_time = [datetime.strptime(d, "%Y%m%d").date()
+                     for d in stock["trade_date"]]
+        predicted = predicts[counter]
+        dataRow = data[counter]
+        length = stock.shape[0] - further
         # 选择子图表
         plt.figure(counter)
 
-        data_time = [datetime.strptime(d, "%Y%m%d").date()
-                     for d in stock["trade_date"]]
         # 配置时间坐标轴
         plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
         plt.gca().xaxis.set_major_locator(AutoDateLocator())  # 时间间隔自动选取
 
         # 绘制历史数据
-        plt.plot(data_time[1:length + 1], dataRow[:length, 2]*stock["low"][0],
-                 label="data_low", color="yellow", lw=1.5)
-        plt.plot(data_time[:], stock["low"].values[:],
-                 label="low", color="blue", lw=1.5)
-        plt.plot(data_time[1:length + 1], predicted[:length, 2]*stock["low"][0],
-                 label="predicted_low", color="red", lw=1.5)
+        plt.plot(data_time[:length], stock["close"].values[:length],
+                 label="stock", c="blue", lw=0.5)
+        # plt.twinx()
+        close_index = 1+len(indicator)*(further-1)
+        print(dataRow[:length, close_index])
+        plt.plot(data_time[further:length+further], dataRow[:length, close_index].T*scaler['close'],
+                 label="data", c="green", lw=0.5)
+        plt.plot(data_time[further:length+further], predicted[:length, close_index].T*scaler['close'],
+                 label="pred", c="red", lw=0.5)
+        # plt.scatter(data_time[:length], dataRow[:length, 1],
+        #             label="data_low", c='b', s=2)
+        # plt.scatter(data_time[:length], predicted[:length, 1],
+        #             label="pred_low", c='g', s=2)
+        # wrong = np.sign(predicted-0.5) == dataRow*2-1
+        # wrong = wrong*0.5+0.25
+        # plt.scatter(data_time[:length], wrong[:length, 1].T,
+        #             label="wrong", c='r', s=5)
+
+        # plt.twinx()
+        # for index, key in enumerate(indicator):
+        #     plt.scatter(data_time[:length],
+        #                 dataRow[:length, index],
+        #                 label="data_%s" % key,
+        #                 c=colorList[index], alpha=0.2,
+        #                 s=2)
+        #     plt.scatter(data_time[:length],
+        #                 predicted[:length, index],
+        #                 label="pred_%s" % key,
+        #                 c=colorList[index], alpha=0.4,
+        #                 s=2)
         plt.gcf().autofmt_xdate()  # 自动旋转日期标记
 
         # 绘图细节
         plt.grid(True)
         plt.axis("tight")
         plt.xlabel("Time", size=20)
-        plt.ylabel("Price", size=20)
+        plt.ylabel("Value", size=20)
         plt.title("Graph", size=20)
         plt.legend(loc=0)  # 添加图例
 
@@ -137,34 +146,44 @@ def showData(stocks, predicts, data, length, batch_size):
 
 
 # 常数设定
-epochs = 100
+epochs = 50
+max_length = 250
+further_step = 20
+indicator = ["open", "close", "low", "vol"]
 codelist = ["600094.SH", "603818.SH", "600507.SH",
             "601377.SH", "600309.SH", "600298.SH", "600018.SH"]
+
 batch_size = len(codelist)
 
 # 数据准备
 hs = get_hs("20160101", "20161201", codelist)
-data, label, length = fomatData(hs, batch_size, hs)
+data, label = fomatData(hs, indicator, max_length, further_step)
 
 # 模型设置
 model = Sequential()
-model.add(GRU(units=32, input_shape=(1, 3),
-              stateful=True, batch_size=batch_size, return_sequences=True))
+model.add(Masking(0, input_shape=(max_length, 4)))
+model.add(GRU(units=64, input_shape=(None, 4),
+              return_sequences=True, implementation=2))
 model.add(Dropout(0.2))
-model.add(GRU(units=16, input_shape=(1, 3),
-              stateful=True, batch_size=batch_size, return_sequences=True))
+model.add(GRU(units=32, return_sequences=True, implementation=2))
 model.add(Dropout(0.2))
-model.add(GRU(units=16, input_shape=(1, 3),
-              stateful=True, batch_size=batch_size))
+model.add(TimeDistributed(Dense(64)))
 model.add(Dropout(0.2))
-model.add(Dense(8, activation="tanh"))
-model.add(Dense(3))
-model.compile(loss='mse', optimizer='rmsprop', metrics=['accuracy'])
+model.add(Dense(4*further_step))
+model.compile(loss='mse',
+              optimizer='rmsprop', metrics=['accuracy'])
 
 # 模型训练与预测
-model.fit(data, label, epochs=epochs, batch_size=batch_size, shuffle=False)
+model.fit(data, label, epochs=epochs, batch_size=batch_size)
+
+
+testcodelist = ["600252.SH", "600315.SH",
+                "600383.SH", "600299.SH", "600026.SH", "603993.SH"]
+batch_size = len(testcodelist)
+hs = get_hs("20160101", "20161101", testcodelist)
+data, label = fomatData(hs, indicator, max_length, further_step)
 model.reset_states()
 predicted = model.predict(data, batch_size=batch_size)
 
 # 显示结果
-showData(hs, predicted, label, length, batch_size)
+showData(predicted, label, indicator, hs, further_step)
